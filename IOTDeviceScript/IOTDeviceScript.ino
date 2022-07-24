@@ -1,30 +1,38 @@
 #include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <ESP8266WiFi.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
 #include <PubSubClient.h>
-#include "DHT.h"
-#define DHTTYPE DHT11   // DHT 11
-
+#include <DHT.h>
  
 // Definiciones
 
-// Pin del sensor de temperatura y humedad y led para alerta
-#define DHTPIN 4
-#define LED D1 // LED
-
+// Ancho de la pantalla (en pixeles)
+#define SCREEN_WIDTH 128
+// Alto de la pantalla (en pixeles)
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+// Pin del sensor de temperatura y humedad
+#define DHTPIN 2
+// Tipo de sensor de temperatura y humedad
+#define DHTTYPE DHT11
 // Intervalo en segundo de las mediciones
 #define MEASURE_INTERVAL 2
 // Duración aproximada en la pantalla de las alertas que se reciban
 #define ALERT_DURATION 60
+
+#define LED D3 // LED
 // Pin para fotoresistor
-#define SENSOR_PIN A0 
+#define SENSOR_PIN A0
  
 
 // Declaraciones
 
 // Sensor DHT
 DHT dht(DHTPIN, DHTTYPE);
+// Pantalla OLED
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 // Cliente WiFi
 WiFiClient net;
 // Cliente MQTT
@@ -35,23 +43,23 @@ PubSubClient client(net);
 
 // WiFi
 // Nombre de la red WiFi
-const char ssid[] = "Apto JC"; 
+const char ssid[] = "OTTIS Wireless DP"; // TODO cambiar por el nombre de la red WiFi
 // Contraseña de la red WiFi
-const char pass[] = "LUCAJUMA";
+const char pass[] = "LUCAJUMA2020"; // TODO cambiar por la contraseña de la red WiFi
 
 //Conexión a Mosquitto
-#define USER "admin2"
-const char MQTT_HOST[] = "44.203.208.151"; // TODO Reemplace ip.maquina.mqtt por la IP del bróker MQTT que usted desplegó. Ej: 192.168.0.1
+#define USER "user1" // TODO Reemplace UsuarioMQTT por un usuario (no administrador) que haya creado en la configuración del bróker de MQTT.
+const char MQTT_HOST[] = "44.195.47.81"; // TODO Reemplace ip.maquina.mqtt por la IP del bróker MQTT que usted desplegó. Ej: 192.168.0.1
 const int MQTT_PORT = 8082;
 const char MQTT_USER[] = USER;
 //Contraseña de MQTT
-const char MQTT_PASS[] = "admin123";
+const char MQTT_PASS[] = "123456"; // TODO Reemplace ContrasenaMQTT por la contraseña correpondiente al usuario especificado.
 
 //Tópico al que se recibirán los datos
 // El tópico de publicación debe tener estructura: <país>/<estado>/<ciudad>/<usuario>/out
-const char MQTT_TOPIC_PUB[] = "colombia/bogota/bogota/" USER "/out";
+const char MQTT_TOPIC_PUB[] = "colombia/boyaca/fira/" USER "/out"; //TODO Reemplace el valor por el tópico de publicación que le corresponde.
 // El tópico de suscripción debe tener estructura: <país>/<estado>/<ciudad>/<usuario>/in
-const char MQTT_TOPIC_SUB[] = "colombia/bogota/bogota/" USER "/in"; //TODO Reemplace el valor por el tópico de suscripción que le corresponde.
+const char MQTT_TOPIC_SUB[] = "colombia/boyaca/fira/" USER "/in"; //TODO Reemplace el valor por el tópico de suscripción que le corresponde.
 
 // Declaración de variables globales
 
@@ -62,13 +70,16 @@ long long int measureTime = millis();
 // Tiempo en que inició la última alerta
 long long int alertTime = millis();
 // Mensaje para mostrar en la pantalla
-String alert = "";/////////////////////////////////////////////////////////////////////
+String alert = "";
 // Valor de la medición de temperatura
 float temp;
 // Valor de la medición de la humedad
 float humi;
+// Valor de la medición de la luminosidad
 int sensorValueLum;
+// Normalizacion minimo para luminosidad
 int MIN_VALUE_LUM = 5;
+// Normalizacion maximo para luminosidad
 int MAX_VALUE_LUM = 1024;
 
 /**
@@ -112,7 +123,7 @@ void mqtt_connect()
 void sendSensorData(float temperatura, float humedad, int luminosity) {
   String data = "{";
   data += "\"temperatura\": "+ String(temperatura, 1) +", ";
-  data += "\"humedad\": "+ String(humedad, 1);
+  data += "\"humedad\": "+ String(humedad, 1) +", ";
   data += "\"luminosidad\": "+ String(luminosity, 1);
   data += "}";
   char payload[data.length()+1];
@@ -151,9 +162,9 @@ float readHumedad() {
   return h;
 }
 
-int getLuminosity(int anaPin)
+int getLuminosity()
 {
-  sensorValueLum = analogRead(anaPin);
+  sensorValueLum = analogRead(SENSOR_PIN);
   float level = 100 - ((sensorValueLum - MIN_VALUE_LUM) * 100 / (MAX_VALUE_LUM - MIN_VALUE_LUM));
   sensorValueLum = level;
   Serial.print("Luminosidad: ");
@@ -176,21 +187,107 @@ bool checkMeasures(float t, float h, int lum) {
 }
 
 /**
+ * Vincula la pantalla al dispositivo y asigna el color de texto blanco como predeterminado.
+ * Si no es exitosa la vinculación, se muestra un mensaje en consola.
+ */
+void startDisplay() {
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Address 0x3D for 128x64
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;);
+  }
+  display.setTextColor(SSD1306_WHITE);
+}
+
+/**
+ * Imprime en la pantallaa un mensaje de "No hay señal".
+ */
+void displayNoSignal() {
+  display.clearDisplay();
+  
+  display.setTextSize(2);
+  display.setCursor(10, 10);
+  display.println("No hay señal");
+  
+  display.display();
+}
+
+/**
+ * Agrega a la pantalla el header con mensaje "IOT Sensors" y en seguida la hora actual
+ */
+void displayHeader() {
+  display.setTextSize(1);
+  long long int milli = now + millis() / 1000;
+  struct tm* tinfo;
+  tinfo = localtime(&milli);
+  String hour = String(asctime(tinfo)).substring(11, 19);
+  
+  String title = "IOT Sensors  " + hour;
+  display.println(title);
+}
+
+/**
+ * Agrega los valores medidos de temperatura y humedad a la pantalla.
+ */
+void displayMeasures() {
+  display.println("");
+  display.print("T: ");
+  display.print(temp);
+  display.print("    ");
+  display.print("H: ");
+  display.print(humi);
+  display.println("");
+}
+
+/**
+ * Agrega el mensaje indicado a la pantalla.
+ * Si el mensaje es OK, se busca mostrarlo centrado.
+ */
+void displayMessage(String message) {
+  
+  display.setTextSize(1);
+  display.println("\nMsg:");
+  
+  display.setTextSize(2);
+  
+  if (message.equals("OK")) {
+    display.println("    " + message); 
+  } else {
+    display.setTextSize(2);
+    display.println("");
+    display.println("");
+    display.println(message); 
+  }
+}
+
+/**
+ * Muestra en la pantalla el mensaje de "Connecting to:" 
+ * y luego el nombre de la red a la que se conecta.
+ */
+void displayConnecting(String ssid) {
+  display.clearDisplay();
+  
+  display.setTextSize(1);
+  display.println("Connecting to:\n");
+  display.println(ssid);
+  
+  display.display();
+}
+
+/**
  * Verifica si ha llegdo alguna alerta al dispositivo.
  * Si no ha llegado devuelve OK, de lo contrario retorna la alerta.
  * También asigna el tiempo en el que se dispara la alerta.
  */
- //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////Revisar para led
 String checkAlert() {
   String message = "OK";
   
   if (alert.length() != 0) {
     message = alert;
-    digitalWrite(LED, HIGH);  // Se prende el LED
+    digitalWrite(LED, LOW);  // Se prende el LED
     if ((millis() - alertTime) >= ALERT_DURATION * 1000 ) {
       alert = "";
       alertTime = millis();
-      digitalWrite(LED, LOW);   // Se apaga el LED
+      digitalWrite(LED, HIGH);  // Se prende el LED
      }
   }
   return message;
@@ -229,6 +326,7 @@ void checkWiFi() {
     {
       WiFi.begin(ssid, pass);
       Serial.print(".");
+      displayNoSignal();
       delay(10);
     }
     Serial.println("connected");
@@ -331,19 +429,19 @@ void configureMQTT() {
  * Verifica si ya es momento de hacer las mediciones de las variables.
  * si ya es tiempo, mide y envía las mediciones.
  */
-void measure(int anaPin) {
+void measure() {
   if ((millis() - measureTime) >= MEASURE_INTERVAL * 1000 ) {
     Serial.println("\nMidiendo variables...");
     measureTime = millis();
     
     temp = readTemperatura();
     humi = readHumedad();
-    sensorValueLum = getLuminosity(anaPin);
-    
+    sensorValueLum = getLuminosity();
+
     // Se chequea si los valores son correctos
     if (checkMeasures(temp, humi, sensorValueLum)) {
       // Se envían los datos
-      sendSensorData(temp, humi,sensorValueLum); 
+      sendSensorData(temp, humi, sensorValueLum); 
     }
   }
 }
@@ -356,6 +454,10 @@ void setup() {
   Serial.begin(115200);
 
   listWiFiNetworks();
+
+  startDisplay();
+
+  displayConnecting(ssid);
 
   startWiFi();
 
@@ -372,5 +474,14 @@ void loop() {
 
   String message = checkAlert();
 
-  measure(SENSOR_PIN);
+  measure();
+  
+  display.clearDisplay();
+  display.setCursor(0,0);
+  
+  displayHeader();
+  displayMeasures();
+  displayMessage(message);
+
+  display.display();
 }
